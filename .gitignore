@@ -1,0 +1,18 @@
+# Generated images, extracted parts, debug data, previews, and local experiments
+temp/
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*config.local.json
+
+# Python / editor artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+.idea/
