@@ -80,10 +80,13 @@ set KRILL_BASE_URL=https://api.cdn-krill-ai.com/v1
 ```bash
 python spine-animation-ai/scripts/split_character.py character.png \
   --output-dir temp/parts \
-  --atlas-out temp/atlas.png
+  --atlas-out temp/atlas.png \
+  --debug-dir temp/split-debug
 ```
 
-该命令使用图片编辑模式让 Krill 依据参考角色生成拆解图，再用 OpenCV 裁出部件。AI 生成并不保证每个部件都正确：先检查部件、命名、层级和透明边缘，再继续装配。
+该命令使用图片编辑模式让 Krill 依据参考角色生成拆解图，再用本地 OpenCV 裁出部件。输出部件是带透明 padding 的 RGBA PNG，并额外生成 `temp/parts/parts.json` manifest。背景只会移除**与图像边缘连通**的近似背景色，因此白色衣服、眼睛和高光不会因为简单抠白而消失。
+
+建议检查 `temp/split-debug/foreground_alpha.png`、`background_mask.png` 和 `contours.png`。AI 生成并不保证每个部件都正确：先检查部件、命名、层级和透明边缘，再继续装配。可用 `--bg-tolerance` 调整背景颜色容差，默认是 `30`；如果仍需旧版灰度参数，可使用兼容选项 `--bg-threshold`。
 
 ### 4. 自动定位部件
 
@@ -149,6 +152,8 @@ Arkspine/
 ```
 
 `temp/` 仅用于参考图、生成图、调试结果、atlas、预览和测试输出，已被 Git 忽略。
+
+拆件输出约定：部件 PNG 必须是 RGBA；`alpha=0` 表示透明 padding，主体通常为 `alpha=255`，轮廓抗锯齿像素可以是中间 alpha。`parts.json` 记录背景估计、画布坐标、部件 bbox 和有效像素数，方便人工复核及后续自动命名。
 
 ## 与上游的关系
 

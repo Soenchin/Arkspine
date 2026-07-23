@@ -40,7 +40,7 @@ before running the pipeline.
 
 <!-- EMBED:scripts/split_character.py -->
 <details>
-<summary>📄 <code>scripts/split_character.py</code> (196 lines)</summary>
+<summary>📄 <code>scripts/split_character.py</code> (471 lines)</summary>
 
 ```python
 #!/usr/bin/env python3
@@ -52,7 +52,12 @@ body parts via OpenCV connected-components analysis.
 Usage:
     python split_character.py <input_image> [--output-dir output_parts]
         [--atlas-out atlas.png] [--min-area 500] [--padding 12]
-        [--bg-threshold 240]
+        [--bg-tolerance 30] [--edge-radius 2] [--debug-dir debug]
+
+The generated atlas normally has a light background. Segmentation only removes
+background pixels connected to the atlas border, so enclosed white details such
+as clothes and eyes are retained. Output parts are RGBA PNGs with transparent
+padding and anti-aliased alpha edges.
 
 Requires:
     pip install opencv-python Pillow numpy openai
@@ -60,6 +65,7 @@ Requires:
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -172,42 +178,269 @@ def generate_atlas(input_image_path: str, atlas_out: str) -> str:
     sys.exit(1)
 
 
+def _load_rgba(path: str) -> np.ndarray:
+    """Read an image without throwing away an existing alpha channel."""
+    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        print(f"ERROR: Could not read atlas image: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2RGBA)
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+    return cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+
+
+def _estimate_background_color(rgba: np.ndarray, border_width: int = 2) -> np.ndarray:
+    """Estimate the atlas background from pixels along its outer border."""
+    height, width = rgba.shape[:2]
+    border_width = max(1, min(border_width, height, width))
+    border = np.concatenate(
+        (
+            rgba[:border_width, :, :3].reshape(-1, 3),
+            rgba[-border_width:, :, :3].reshape(-1, 3),
+            rgba[:, :border_width, :3].reshape(-1, 3),
+            rgba[:, -border_width:, :3].reshape(-1, 3),
+        ),
+        axis=0,
+    )
+    border_alpha = np.concatenate(
+        (
+            rgba[:border_width, :, 3].reshape(-1),
+            rgba[-border_width:, :, 3].reshape(-1),
+            rgba[:, :border_width, 3].reshape(-1),
+            rgba[:, -border_width:, 3].reshape(-1),
+        ),
+        axis=0,
+    )
+    opaque = border_alpha > 0
+    if not opaque.any():
+        # A transparent atlas has no reliable chroma sample. The color is only
+        # used for optional edge un-matting, so white is the safest fallback.
+        return np.array([255.0, 255.0, 255.0], dtype=np.float32)
+    border = border[opaque]
+    if not len(border):
+        return np.array([255.0, 255.0, 255.0], dtype=np.float32)
+    return np.median(border.astype(np.float32), axis=0)
+
+
+def _background_mask(rgba: np.ndarray, bg_tolerance: int, edge_radius: int):
+    """Build a foreground alpha mask while preserving enclosed light details.
+
+    A pixel is considered removable background only when it is close to the
+    estimated border color *and* connected to an image edge. This avoids the
+    classic chroma-key failure where a white shirt or eye highlight disappears.
+    A small band around the detected foreground gets estimated anti-aliased
+    alpha and is un-matted against the background color to avoid white halos.
+    """
+    rgb = rgba[:, :, :3].astype(np.float32)
+    source_alpha = rgba[:, :, 3].astype(np.float32)
+    background = _estimate_background_color(rgba)
+
+    color_distance = np.sqrt(np.sum((rgb - background) ** 2, axis=2))
+    candidate = (source_alpha > 0) & (color_distance <= float(bg_tolerance))
+
+    component_count, labels = cv2.connectedComponents(
+        candidate.astype(np.uint8), connectivity=8
+    )
+    del component_count
+    border_labels = np.unique(
+        np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1]))
+    )
+    border_labels = border_labels[border_labels != 0]
+    background_region = np.isin(labels, border_labels)
+
+    # Everything not belonging to border-connected background is a foreground
+    # seed. Enclosed white clothing/details therefore remain opaque.
+    foreground_seed = (source_alpha > 0) & ~background_region
+    alpha = np.where(foreground_seed, source_alpha, 0.0).astype(np.float32)
+    output_rgb = rgb.copy()
+
+    if np.any(foreground_seed) and edge_radius > 0:
+        # Find the nearest foreground seed for pixels just outside its edge.
+        distance_source = np.where(foreground_seed, 0, 255).astype(np.uint8)
+        distance, nearest_labels = cv2.distanceTransformWithLabels(
+            distance_source,
+            cv2.DIST_L2,
+            cv2.DIST_MASK_PRECISE,
+            cv2.DIST_LABEL_PIXEL,
+        )
+
+        # DIST_LABEL_PIXEL gives each seed pixel a label. Build a compact lookup
+        # table so the nearby seed's color can be used for un-matting.
+        seed_coords = np.argwhere(foreground_seed)
+        seed_labels = nearest_labels[foreground_seed]
+        unique_labels, first_indices = np.unique(seed_labels, return_index=True)
+        label_colors = np.zeros((int(nearest_labels.max()) + 1, 3), dtype=np.float32)
+        label_colors[unique_labels] = rgb[
+            seed_coords[first_indices, 0], seed_coords[first_indices, 1]
+        ]
+        nearest_rgb = label_colors[nearest_labels]
+
+        edge = (
+            background_region
+            & ~foreground_seed
+            & (distance <= float(edge_radius))
+            & (source_alpha > 0)
+        )
+        if np.any(edge):
+            foreground_delta = nearest_rgb - background
+            pixel_delta = rgb - background
+            denominator = np.sum(foreground_delta * foreground_delta, axis=2)
+            numerator = np.sum(pixel_delta * foreground_delta, axis=2)
+            estimated = np.divide(
+                numerator,
+                denominator,
+                out=np.zeros_like(numerator),
+                where=denominator > 1.0,
+            )
+            estimated = np.clip(estimated, 0.0, 1.0)
+
+            # If the nearest foreground color is itself almost the background,
+            # use a conservative geometric fallback. This is rare, but avoids
+            # NaNs for very pale artwork.
+            geometric = np.clip(
+                1.0 - np.maximum(distance - 0.25, 0.0) / max(float(edge_radius), 1.0),
+                0.0,
+                1.0,
+            ) * 0.5
+            estimated = np.where(denominator > 1.0, estimated, geometric)
+            edge_alpha = estimated * 255.0
+            alpha[edge] = np.minimum(source_alpha[edge], edge_alpha[edge])
+
+            # Recover the foreground color from the composited pixel. Keeping
+            # RGB un-matted matters when this PNG is later placed on a dark
+            # atlas or rendered over a non-white game background.
+            safe_alpha = np.maximum(edge_alpha / 255.0, 1.0 / 255.0)
+            unmatted = background + (rgb - background) / safe_alpha[:, :, None]
+            output_rgb[edge] = np.clip(unmatted[edge], 0.0, 255.0)
+
+    result = np.empty_like(rgba)
+    result[:, :, :3] = np.clip(output_rgb, 0, 255).astype(np.uint8)
+    result[:, :, 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+    return result, background, background_region, foreground_seed
+
+
+def _save_debug_images(
+    debug_dir: str,
+    rgba: np.ndarray,
+    alpha: np.ndarray,
+    background_region: np.ndarray,
+    contours,
+):
+    """Save masks and contour overlays for human inspection."""
+    os.makedirs(debug_dir, exist_ok=True)
+    Image.fromarray((background_region.astype(np.uint8) * 255), "L").save(
+        os.path.join(debug_dir, "background_mask.png")
+    )
+    Image.fromarray(alpha, "L").save(os.path.join(debug_dir, "foreground_alpha.png"))
+
+    overlay = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2BGR)
+    cv2.drawContours(overlay, contours, -1, (0, 180, 255), 2)
+    cv2.imwrite(os.path.join(debug_dir, "contours.png"), overlay)
+
+
 def segment_parts(
     atlas_path: str,
     output_dir: str,
     min_area: int = 500,
     padding: int = 12,
     bg_threshold: int = 240,
+    bg_tolerance=None,
+    edge_radius: int = 2,
+    debug_dir=None,
+    manifest_out=None,
 ):
-    """Segment the generated atlas into individual body parts."""
-    atlas_img = cv2.imread(atlas_path)
-    if atlas_img is None:
-        print(f"ERROR: Could not read atlas image: {atlas_path}", file=sys.stderr)
-        sys.exit(1)
+    """Segment an atlas into transparent RGBA body-part PNGs.
 
-    gray = cv2.cvtColor(atlas_img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, bg_threshold, 255, cv2.THRESH_BINARY_INV)
+    ``bg_threshold`` remains as a compatibility argument for callers of the
+    original function. New callers should use ``bg_tolerance``: Euclidean RGB
+    distance from the estimated border background.
+    """
+    rgba, background, background_region, _ = _background_mask(
+        _load_rgba(atlas_path),
+        (
+            max(12, int(round(max(0, 255 - bg_threshold) * np.sqrt(3))))
+            if bg_tolerance is None
+            else max(1, int(bg_tolerance))
+        ),
+        max(0, int(edge_radius)),
+    )
+    height, width = rgba.shape[:2]
 
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Use alpha rather than RGB brightness for contour detection. White parts
+    # are now valid foreground and transparent padding is truly excluded.
+    part_mask = (rgba[:, :, 3] >= 16).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(
+        part_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    contours = [cnt for cnt in contours if cv2.contourArea(cnt) >= min_area]
+    contours.sort(key=lambda cnt: (cv2.boundingRect(cnt)[1], cv2.boundingRect(cnt)[0]))
 
     os.makedirs(output_dir, exist_ok=True)
+    if debug_dir:
+        _save_debug_images(
+            debug_dir,
+            rgba,
+            rgba[:, :, 3],
+            background_region,
+            contours,
+        )
 
     parts = []
-    for i, cnt in enumerate(contours):
-        area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
+    manifest_parts = []
+    for index, cnt in enumerate(contours, start=1):
+        original_x, original_y, original_w, original_h = cv2.boundingRect(cnt)
+        x = max(0, original_x - padding)
+        y = max(0, original_y - padding)
+        right = min(width, original_x + original_w + padding)
+        bottom = min(height, original_y + original_h + padding)
 
-        x, y, w, h = cv2.boundingRect(cnt)
-        x = max(0, x - padding)
-        y = max(0, y - padding)
-        w = min(atlas_img.shape[1] - x, w + 2 * padding)
-        h = min(atlas_img.shape[0] - y, h + 2 * padding)
+        part = rgba[y:bottom, x:right].copy()
+        name = f"part_{index:03d}"
+        part_path = os.path.join(output_dir, f"{name}.png")
+        Image.fromarray(part, "RGBA").save(part_path)
+        parts.append((name, part_path))
+        manifest_parts.append(
+            {
+                "name": name,
+                "file": os.path.basename(part_path),
+                "bbox": {
+                    "x": int(original_x),
+                    "y": int(original_y),
+                    "width": int(original_w),
+                    "height": int(original_h),
+                },
+                "canvas_bbox": {
+                    "x": int(x),
+                    "y": int(y),
+                    "width": int(right - x),
+                    "height": int(bottom - y),
+                },
+                "contour_area": int(round(cv2.contourArea(cnt))),
+                "opaque_pixels": int(np.count_nonzero(part[:, :, 3] >= 250)),
+                "alpha_pixels": int(np.count_nonzero(part[:, :, 3] >= 16)),
+            }
+        )
 
-        part = atlas_img[y : y + h, x : x + w]
-        part_path = os.path.join(output_dir, f"part_{i:03d}.png")
-        cv2.imwrite(part_path, part)
-        parts.append((f"part_{i:03d}", part_path))
+    if manifest_out is None:
+        manifest_out = os.path.join(output_dir, "parts.json")
+    manifest = {
+        "atlas": os.path.basename(atlas_path),
+        "atlas_width": int(width),
+        "atlas_height": int(height),
+        "background_color": [int(round(value)) for value in background],
+        "background_tolerance": int(
+            max(12, int(round(max(0, 255 - bg_threshold) * np.sqrt(3))))
+            if bg_tolerance is None
+            else max(1, int(bg_tolerance))
+        ),
+        "edge_radius": max(0, int(edge_radius)),
+        "parts": manifest_parts,
+    }
+    with open(manifest_out, "w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, indent=2, ensure_ascii=False)
 
     return parts
 
@@ -220,8 +453,35 @@ def main():
     parser.add_argument("--output-dir", default="parts", help="Output directory for parts")
     parser.add_argument("--atlas-out", default="atlas.png", help="Output atlas path")
     parser.add_argument("--min-area", type=int, default=500, help="Minimum contour area")
-    parser.add_argument("--padding", type=int, default=12, help="Padding around parts")
-    parser.add_argument("--bg-threshold", type=int, default=240, help="Background threshold")
+    parser.add_argument("--padding", type=int, default=12, help="Transparent padding around parts")
+    parser.add_argument(
+        "--bg-tolerance",
+        type=int,
+        default=30,
+        help="RGB distance tolerance for border-connected background (default: 30)",
+    )
+    parser.add_argument(
+        "--bg-threshold",
+        type=int,
+        default=None,
+        help="Deprecated grayscale compatibility option; prefer --bg-tolerance",
+    )
+    parser.add_argument(
+        "--edge-radius",
+        type=int,
+        default=2,
+        help="Pixels around the foreground used for anti-aliased alpha (default: 2)",
+    )
+    parser.add_argument(
+        "--debug-dir",
+        default=None,
+        help="Write background/alpha masks and contour overlay here",
+    )
+    parser.add_argument(
+        "--manifest-out",
+        default=None,
+        help="Path for parts.json (default: <output-dir>/parts.json)",
+    )
 
     args = parser.parse_args()
 
@@ -230,7 +490,22 @@ def main():
     print(f"  Atlas saved: {atlas_path}")
 
     print("Step 2: Segmenting parts from atlas...")
-    parts = segment_parts(atlas_path, args.output_dir, args.min_area, args.padding, args.bg_threshold)
+    bg_tolerance = args.bg_tolerance
+    if args.bg_threshold is not None:
+        # Preserve the old CLI's approximate meaning: grayscale values below
+        # bg_threshold were treated as foreground against a white background.
+        bg_tolerance = max(12, int(round(max(0, 255 - args.bg_threshold) * np.sqrt(3))))
+
+    parts = segment_parts(
+        atlas_path,
+        args.output_dir,
+        args.min_area,
+        args.padding,
+        bg_tolerance=bg_tolerance,
+        edge_radius=args.edge_radius,
+        debug_dir=args.debug_dir,
+        manifest_out=args.manifest_out,
+    )
 
     print(f"  Generated {len(parts)} parts:")
     for name, path in parts:
@@ -1667,13 +1942,17 @@ individual part PNGs.
 
 ```bash
 KRILL_API_KEY=your_key python /home/claude/spine-scripts/split_character.py character.png \
-  --output-dir parts/
+  --output-dir parts/ \
+  --debug-dir split-debug/
 ```
 
 This sends the character image to Krill GPT Image, which generates a flat sprite-sheet
-atlas with all body parts separated. OpenCV connected-components analysis then crops each
-part into its own PNG. The resulting `parts/` directory can be fed directly into
-**Step 1** (`position_parts.py`).
+atlas with all body parts separated. Local OpenCV analysis then removes only
+border-connected background pixels and crops each part into a transparent RGBA PNG.
+Enclosed white details such as clothes and eye highlights are retained. The command also
+writes `parts/parts.json` plus `split-debug/foreground_alpha.png`,
+`background_mask.png`, and `contours.png` for inspection. The resulting `parts/`
+directory can be fed directly into **Step 1** (`position_parts.py`).
 
 ### Step 1: Analyze the Assets
 

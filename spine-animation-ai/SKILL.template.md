@@ -82,13 +82,17 @@ individual part PNGs.
 
 ```bash
 KRILL_API_KEY=your_key python /home/claude/spine-scripts/split_character.py character.png \
-  --output-dir parts/
+  --output-dir parts/ \
+  --debug-dir split-debug/
 ```
 
 This sends the character image to Krill GPT Image, which generates a flat sprite-sheet
-atlas with all body parts separated. OpenCV connected-components analysis then crops each
-part into its own PNG. The resulting `parts/` directory can be fed directly into
-**Step 1** (`position_parts.py`).
+atlas with all body parts separated. Local OpenCV analysis then removes only
+border-connected background pixels and crops each part into a transparent RGBA PNG.
+Enclosed white details such as clothes and eye highlights are retained. The command also
+writes `parts/parts.json` plus `split-debug/foreground_alpha.png`,
+`background_mask.png`, and `contours.png` for inspection. The resulting `parts/`
+directory can be fed directly into **Step 1** (`position_parts.py`).
 
 ### Step 1: Analyze the Assets
 

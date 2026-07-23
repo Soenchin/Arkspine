@@ -280,7 +280,10 @@ def main():
         title=args.title,
     )
 
-    with open(args.output, "w") as f:
+    # Always emit UTF-8: the page declares UTF-8 and titles may contain
+    # non-ASCII characters. Relying on the Windows locale can silently write
+    # GBK/ACP bytes and make browsers misread an otherwise valid preview.
+    with open(args.output, "w", encoding="utf-8", newline="\n") as f:
         f.write(html)
 
     size_kb = os.path.getsize(args.output) / 1024

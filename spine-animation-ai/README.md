@@ -119,8 +119,11 @@ Prerequisites:
 
 ```bash
 KRILL_API_KEY=your_key python3 scripts/split_character.py character.png \
-  --output-dir parts/
+  --output-dir parts/ \
+  --debug-dir split-debug/
 ```
+
+The splitter writes transparent RGBA part PNGs and `parts/parts.json`. It removes only background-colored pixels connected to the atlas border, so enclosed white details are preserved. Use `--bg-tolerance` to tune the RGB background tolerance and inspect `split-debug/foreground_alpha.png`, `background_mask.png`, and `contours.png` before continuing.
 
 Skip this step if you already have separated body-part PNGs.
 
