@@ -1,6 +1,9 @@
 # Generated images, extracted parts, debug data, previews, and local experiments
 temp/
 
+# Private assets and local archives; never publish
+/private-assets/
+
 # Secrets and machine-local configuration
 .env
 .env.*

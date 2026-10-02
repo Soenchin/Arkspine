@@ -1,201 +1,240 @@
-<div align="center">
-
 # Arkspine
 
-### 从角色立绘到可检查的 Spine 2D 骨骼动画原型
+## 从角色参考到 Q 版 Spine 动画的实践指南
 
-[![License: AGPL-3.0-or-later](https://img.shields.io/badge/Arkspine-AGPL--3.0--or--later-8A2BE2?style=flat-square)](LICENSE)
-[![Upstream: PolyForm NC](https://img.shields.io/badge/upstream-PolyForm%20Noncommercial%201.0.0-ff8c00?style=flat-square)](spine-animation-ai/LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Spine](https://img.shields.io/badge/Spine-4.2-16A6D9?style=flat-square)](https://esotericsoftware.com/spine-in-depth)
-[![Krill GPT Image](https://img.shields.io/badge/image%20pipeline-Krill%20GPT%20Image%202-15a56b?style=flat-square)](https://api.cdn-krill-ai.com/v1)
-[![Status: Prototype](https://img.shields.io/badge/status-prototype-yellow?style=flat-square)](#当前状态)
+这个仓库用于探索、记录并复现一条制作路线：**先生成合适的 Q 版角色图，再清理、拆件、装配，最后到真实播放器里验证动作。**
 
-**把一张角色图拆成动画部件，自动定位、装配为 Spine JSON / Atlas，并生成浏览器预览。**
+它是指南文档与辅助脚本的集合，不以软件产品发布为目标，也不是“任意立绘一键转换为任意骨骼动画”的工具。重点是说明每一步需要什么、哪些地方需要人工判断，以及怎样判断结果真的可用。
 
-</div>
+**QQ 交流群：732123758**
 
-> [!WARNING]
-> 这是研究原型，不是“一张立绘无损变工业级 Spine”的魔法机。当前最可靠的输出是 **简单 cutout 骨骼** 与基础动作；复杂 mesh、权重、布料、特效、皮肤切换仍需要人工制作或后续管线支持。
-
-## 它能做什么
+## 路线与验证边界
 
 ```text
-角色参考图
-  ↓ Krill GPT Image：图像编辑式拆件
-拆解 sprite sheet
-  ↓ OpenCV：连通域裁切
-透明 PNG 部件
-  ↓ SIFT + RANSAC：与原图自动对位
-初始布局 + 层级顺序
-  ↓ 固定模板骨架 + 动作预设
-Spine 4.2 JSON + .atlas + PNG + HTML 预览
+有权使用的角色参考图 + 小人比例参考
+  ↓ GPT 等图像模型：生成完整 Q 版 T-pose
+人工验收造型、比例、姿势
+  ↓ 按需使用 Qwen 等编辑模型清理背景
+本地透明化与边缘处理
+  ↓ 人工指定部件边界，代码或图像编辑器切割
+透明部件 + 原坐标 + 关节与层级记录
+  ↓ 原坐标重组 → 指定枢轴 → 装配骨架
+Spine 4.2 JSON + Atlas + 浏览器预览
+  ↓ 单关节小幅测试 → 补遮挡与接缝 → 扩展动作
 ```
 
-当前已验证的核心链路：
+**已经验证的最小路线**：完整 Q 版图经过背景编辑和本地透明处理，人工指定边界切成部件，按显式关节位置装配，并在官方 Spine Web Player 中完成局部肩肘运动测试。
 
-- 使用 **Krill GPT Image 2** 的 OpenAI 兼容 `images.edit` 接口，基于参考图生成拆解部件表；
-- 从白底 sprite sheet 裁出单独的角色部件；
-- 用 SIFT + RANSAC 将部件回贴至参考图位置，缺少特征时回退模板匹配；
-- 生成可读的 Spine 4.2 JSON、贴图 atlas 以及 Web Player 预览页；
-- 生成基础 `idle`、`walk`、`run`、`attack`、`jump`、`wave` 动作数据。
+这证明路线可行，不代表任意输入都有效，也不代表以下问题已经解决：
 
-## 当前状态
+| 环节 | 当前边界 |
+| --- | --- |
+| 参考图 → Q 版 | 需要挑图、修提示词；模型可能改变发色、服装或身体比例。 |
+| 背景清理 | 生成式编辑可能改像素和尺寸；输出白底不等于输出透明图。 |
+| 拆件 | 已验证路线依赖人工边界，不是自动人体语义分割。 |
+| 骨架 | 关节位置、父子关系、绘制顺序需要明确指定或复核。 |
+| 动作 | 只验证了局部小幅动作；预设存在不等于成品动作通过验收。 |
+| 侧面、背面和大幅动作 | 单张正面图缺少对应信息，需要补画、增加视图或重新制作。 |
 
-| 模块 | 状态 | 说明 |
-| --- | :---: | --- |
-| 单图 → 拆件 sprite sheet | ✅ | Krill 图像编辑能产出结构合理的角色部件图；结果需人工检查。 |
-| sprite sheet → 独立部件 | ✅ | OpenCV 自动裁切；当前白底/浅色部件的 Alpha 清理仍需加强。 |
-| 部件 → 原图定位 | ✅ | SIFT + RANSAC 为主，模板匹配兜底；遮挡、纯色和小配件会有误差。 |
-| 自动命名与部件语义识别 | 🟡 | 目前仍会产生 `part_007` 等匿名部件，需要模板或人工复核。 |
-| 基础 cutout 骨架与预设动作 | ✅ | 适合原型、简单小人和动作草案。 |
-| Mesh / 权重 / 物理 / 特效 | ❌ | 不在当前范围。 |
-| 直接复刻任何游戏的正式 Spine | ❌ | 不提供，也不应使用第三方游戏资产。 |
+下面是制作方法，不是一条从头到尾无人干预的命令。GPT/Qwen 的生成与清理步骤需在你自己的工具环境中执行；本仓库未提供统一的模型部署或调用入口。
 
-## 快速开始
+## 1. 先生成一张合适的完整小人图
 
-### 1. 安装依赖
+先解决美术，再做骨骼。正常比例的立绘即使能动，也不会自动变成大头短身的战斗小人。
 
-```bash
-pip install opencv-python Pillow numpy openai
-```
+建议把参考图的职责分开：
 
-### 2. 配置 Krill GPT Image
+- **角色参考**：提供身份、发型、配色和服装。
+- **比例／风格参考**：提供大头短身比例、轮廓与色块处理，不照搬参考角色。
+- **姿势要求**：正面 T-pose，双臂水平伸直，双腿略分开，耳尖、手指与鞋底完整入画。
 
-`split_character.py` 读取配置的优先顺序：
-
-1. `KRILL_API_KEY` / `KRILL_BASE_URL` 环境变量；
-2. `OPENAI_API_KEY` / `OPENAI_BASE_URL` 环境变量；
-3. 本机 Pi skill 的 `~/.pi/agent/skills/krill-gpt-image/config.local.json`。
-
-示例（不要把真实 key 提交进 Git）：
-
-```bash
-set KRILL_API_KEY=你的密钥
-set KRILL_BASE_URL=https://api.cdn-krill-ai.com/v1
-```
-
-### 3. 从参考图生成部件
-
-```bash
-python spine-animation-ai/scripts/split_character.py character.png \
-  --output-dir temp/parts \
-  --atlas-out temp/atlas.png \
-  --debug-dir temp/split-debug
-```
-
-该命令使用图片编辑模式让 Krill 依据参考角色生成拆解图，再用本地 OpenCV 裁出部件。输出部件是带透明 padding 的 RGBA PNG，并额外生成 `temp/parts/parts.json` manifest。背景只会移除**与图像边缘连通**的近似背景色，因此白色衣服、眼睛和高光不会因为简单抠白而消失。
-
-建议检查 `temp/split-debug/foreground_alpha.png`、`background_mask.png` 和 `contours.png`。AI 生成并不保证每个部件都正确：先检查部件、命名、层级和透明边缘，再继续装配。可用 `--bg-tolerance` 调整背景颜色容差，默认是 `30`；如果仍需旧版灰度参数，可使用兼容选项 `--bg-threshold`。
-
-### 4. 自动定位部件
-
-```bash
-python spine-animation-ai/scripts/position_parts.py \
-  --reference character.png \
-  --parts temp/parts \
-  --output temp/layout.json \
-  --debug temp/debug
-```
-
-请检查 `temp/debug/comparison.png`。部件遮挡严重、颜色太平、体积过小时，自动定位结果可能很离谱——别把它当占卜结果，手动调整是正常步骤。
-
-### 5. 生成 Atlas、Spine JSON 和预览
-
-`build_spine_json.py` 需要一个明确的骨骼/slot 配置 JSON。推荐先把自动分出的匿名部件命名为 `head`、`torso`、`left-upper-arm` 等，再映射到固定模板骨架。
-
-```bash
-python spine-animation-ai/scripts/make_atlas.py \
-  --parts temp/parts \
-  --output temp/spine \
-  --name character
-
-python spine-animation-ai/scripts/build_spine_json.py \
-  --config temp/skeleton-config.json \
-  --output temp/spine/character.json
-
-python spine-animation-ai/scripts/generate_spine_player.py \
-  --skeleton temp/spine/character.json \
-  --atlas temp/spine/character.atlas \
-  --atlas-image temp/spine/character.png \
-  --output temp/spine/preview.html
-```
-
-## 推荐的 L4 工作流
-
-目标不是让模型盲猜每个复杂角色的完整 rig，而是建立一套**固定模板骨架**：
-
-1. 定义小人模板的头身比例、骨骼层级、slot 命名和基础动作；
-2. AI 只负责生成/拆出可替换贴图；
-3. 自动程序负责初始定位、atlas 与动作草案；
-4. 人工检查部件名、穿插层、枢轴和关键帧；
-5. 对效果需求高的部位，再在 Spine 编辑器补 mesh、权重、特效和物理。
-
-这条路的好处是：每次都在一个可控的 skeleton 上换皮，而不是让模型从零赌一整套骨架。
-
-## 目录说明
+通用提示词起点，可按实际参考修改：
 
 ```text
-Arkspine/
-├── LICENSE                         # Arkspine 自有代码：AGPL-3.0-or-later
-├── README.md
-├── .gitignore                      # 忽略 temp/、密钥和本地产物
-└── spine-animation-ai/             # 上游代码的内置副本（见许可证说明）
-    ├── LICENSE                     # PolyForm Noncommercial 1.0.0，必须保留
-    ├── scripts/
-    │   ├── split_character.py      # 已改：Gemini → Krill GPT Image
-    │   ├── position_parts.py
-    │   ├── build_spine_json.py
-    │   ├── make_atlas.py
-    │   └── generate_spine_player.py
-    └── ...
+生成 image1 中角色的完整 Q 版正面 T-pose。
+image1 只负责角色身份、配色和服装；image2 只负责小人的头身比例与二维画法。
+保留角色辨识特征，但将身体处理为大头、短躯干、短四肢，适合缩小显示。
+脸、胸口和双脚朝前，双臂从肩膀水平展开，肘部伸直，双腿稍微分开。
+所有肢体完整入画，四周留白，人物放在均匀纯色背景上。
+只画一个完整角色，不画拆件表、多视图、文字、地台和特效。
 ```
 
-`temp/` 仅用于参考图、生成图、调试结果、atlas、预览和测试输出，已被 Git 忽略。
+验收后再继续：
 
-拆件输出约定：部件 PNG 必须是 RGBA；`alpha=0` 表示透明 padding，主体通常为 `alpha=255`，轮廓抗锯齿像素可以是中间 alpha。`parts.json` 记录背景估计、画布坐标、部件 bbox 和有效像素数，方便人工复核及后续自动命名。
+- 比例是否真的符合目标，而不只是把正常立绘的头放大？
+- 身份、服装、手指和左右肢体是否合理？
+- 胳膊、身体、双腿之间是否有足够空隙？
+- 参考图是否把正常身材或不需要的配件一起带进来了？
 
-## 与上游的关系
+**T-pose 是拆件与绑定用底图，不是最终战斗待机姿势。** 正面底图也不能代替侧向行走所需的美术。
 
-本仓库内置并修改了 [GenielabsOpenSource/spine-animation-ai](https://github.com/GenielabsOpenSource/spine-animation-ai)：
+## 2. 清理背景，再得到真正的透明图
 
-- 上游项目版权：`Copyright (c) 2025 Spine Animation AI Contributors`；
-- 上游目录及其修改版继续受 [`PolyForm Noncommercial License 1.0.0`](spine-animation-ai/LICENSE) 约束；
-- 本项目的主要改动是将 `scripts/split_character.py` 的图像生成链路从 Google Gemini 改为 **Krill GPT Image 2 / OpenAI-compatible Images API**；
-- 上游的 `reskin-app/` 仍保留 Gemini 相关实现，**本次并未将它改造成 Krill**；
-- 本仓库当前不追踪上游 Git 历史，也不以 fork 形式与上游同步。
+如果已有干净 RGBA 图，可以跳过生成式背景编辑。否则，可让编辑模型只清理背景，再用本地工具提取 alpha。
 
-## 许可证与使用边界
+```text
+只将 image1 的背景清理为均匀纯白，包括手指之间、双臂下方和两腿之间的空隙。
+保留人物的造型、发色、服装、表情、姿势、位置和大小。
+保留人物自身的白色衣服、眼睛高光等细节，不增加外轮廓白边。
+不重设计、不裁切、不拆件，不输出棋盘格。
+```
 
-### Arkspine 自有内容：AGPL-3.0-or-later
+注意：
 
-根目录 [`LICENSE`](LICENSE) 适用于 Arkspine 新增的文档、配置、脚本和未来自有代码。若你修改并向网络用户提供这部分程序，AGPL 通常要求向这些用户提供对应源代码。
+- “保留不变”只是模型指令，不是像素锁；检查实际输出尺寸和人物细节。
+- 去除**与图像边缘相连的背景区域**，比把所有白色像素删除更安全，但仍需检查背景是否漏入人物内部。
+- 用真正的 RGBA alpha 表示透明，不要把画出来的棋盘格当透明。
+- 分别放在深色、浅色底上检查白边、黑边和误删；白底上看不见的白边，进游戏后可能很明显。
+- 原始图、编辑输出、透明化结果分别保存，避免后续无法定位哪一步改变了角色。
 
-### `spine-animation-ai/`：PolyForm Noncommercial 1.0.0
+## 3. 拆件，先证明能原样拼回
 
-这个目录**不**因为放进 Arkspine 就变成 AGPL，也不因 AGPL 而获得商业授权。其原许可证禁止商业用途；对其进行修改、分发或基于它提供服务时，必须保留该目录的许可证与 Required Notice，并遵守非商业限制。
+最初可以拆成：头、躯干、骨盆，以及左右上臂、前臂、手、大腿、小腿、脚。部件数量按造型和动作需要调整，不必固定为 15 件。
 
-换句话说：**这是一个混合许可证仓库。** 不要把整个项目宣传为“纯 AGPL、可商用”。若要商业化，需取得上游授权，或以不包含/不依赖上游代码的独立实现替换该部分。
+### 两种拆法不要混淆
 
-### 第三方资产
+- **从完整图切割**：人工画蒙版或指定边界，代码保留各区域的可见像素。位置容易保留，但没有被遮住的结构。
+- **让模型生成分离部件**：可能补出遮挡内容，但也容易改变比例、角度和细节，之后要重新对位。
 
-请勿上传、分发或用作训练/发布素材：
+本指南优先从第一种开始，再针对缺少的关节区域补画。现有连通域裁切脚本只能分开已经分离的图块，不能把一个连在一起的人物自动理解为头、手臂和腿。
 
-- 《明日方舟》《杀戮尖塔》或其他游戏的官方图像、Spine 数据、atlas、动画曲线、角色设计；
-- 你没有权利再分发的角色立绘；
-- API key、访问令牌、个人资料和生成服务的私密配置。
+### 每个部件应记录什么
 
-可以研究动作的通用原则（重心、缓入缓出、蓄力—击打—回弹），但不要把第三方游戏资源或导出的骨架数据塞进仓库。
+- 名称与对应 PNG；左右按画面还是角色自身区分，必须统一。
+- 原图画布尺寸、裁切框 `(left, top, right, bottom)`。
+- 关节位置、父骨骼、前后绘制顺序。
+- 是否有补画、重叠区域及其来源。
 
-## 致谢
+可先保存与原图同尺寸的透明图层，重组确认后再裁紧；裁紧时必须保留原坐标偏移。
 
-- [Spine Animation AI](https://github.com/GenielabsOpenSource/spine-animation-ai) —— 上游自动装配管线；
-- [Spine](https://esotericsoftware.com/) —— 2D 骨骼动画工具与运行时；
-- [Krill GPT Image](https://api.cdn-krill-ai.com/v1) —— 图像拆件实验所用的 OpenAI 兼容图像接口；
-- OpenCV、Pillow、Spine Web Player。
+**验收：**将可见图层按原坐标拼回，检查是否漏切、重复或错位。对未补画、互不重叠的切片，可比较前景 RGB 和 alpha 是否与透明底图一致。这个一致性只针对选定的透明底图，不证明之前的 AI 编辑保留了原始图。
 
----
+静态拼回成功也不证明关节能转。肩根、腋下、肘部、髋部等位置往往需要补隐藏结构；简单硬切无法凭空得到这些像素。
 
-<div align="center">
-  <sub>Arkspine 是一个非商业研究原型。先让小人长出骨头，再谈让它跳舞。🐾</sub>
-</div>
+## 4. 指定关节，装配骨架
+
+三个基本概念：
+
+- **骨骼（bone）**：控制位置与旋转，子骨骼跟随父骨骼。
+- **插槽（slot）**：把贴图挂到骨骼上，并确定前后绘制顺序。
+- **贴图附件（attachment）**：具体图像及其相对骨骼的位置、大小。
+
+例如，前臂挂在上臂下，手挂在前臂下；转肩时整条手臂一起运动，弯肘时只影响前臂及手。枢轴必须放在关节附近，不能简单用图块中心替代。
+
+对于未旋转、未缩放的正面切片，画布宽高为 `W、H`，可采用以下坐标约定：
+
+```text
+图像坐标：左上角为原点，y 向下
+Spine 坐标：画布底部中央为原点，y 向上
+
+图像点 (x, y) → Spine 点 (x - W/2, H - y)
+子骨骼的局部位置 = 该关节的 Spine 坐标 - 父关节的 Spine 坐标
+附件中心的局部位置 = 裁切框中心的 Spine 坐标 - 所属关节的 Spine 坐标
+```
+
+父骨骼在设置姿势中有旋转或缩放时，需要使用逆变换，不能继续只做减法。
+
+**贴图契约：**`make_atlas.py` 用 PNG 文件名去掉扩展名作为 region 名，例如 `forearm.png` 对应 `forearm`。配置中的 attachment `path` 必须匹配这个名字，不能写成 `forearm.png`。
+
+## 5. 用辅助脚本导出与预览
+
+以下命令从仓库根目录执行。前提是你已经完成拆件，并准备好人工检查过的配置；它们不会替你完成上面的美术与关节判断。
+
+### 准备输入
+
+- `temp/parts/`：只放本次要打包的透明部件 PNG，不要混入参考图和联系表。
+- `temp/skeleton-config.json`：包含 `bones`、`slots`、`attachments`，以及要测试的动画。
+- 最小导出依赖：`python -m pip install Pillow`。
+
+配置格式可参考 [骨架生成器](spine-animation-ai/scripts/build_spine_json.py) 文件顶部和 [Spine JSON 格式说明](spine-animation-ai/references/spine-json-spec.md)。注意区分**生成器输入配置**与**最终 Spine JSON**，不能把两者直接互换。
+
+### 导出
+
+下面使用单行命令，便于在不同终端中复制：
+
+```bash
+python spine-animation-ai/scripts/make_atlas.py --parts temp/parts --output temp/spine --name character
+python spine-animation-ai/scripts/build_spine_json.py --config temp/skeleton-config.json --output temp/spine/character.json
+python spine-animation-ai/scripts/generate_spine_player.py --skeleton temp/spine/character.json --atlas temp/spine/character.atlas --atlas-image temp/spine/character.png --output temp/spine/preview.html --animation joint_probe
+```
+
+`joint_probe` 必须是配置中实际存在的动画名。可以在配置中设置 `"animations": []`，不用预设，改为添加一个只转动单根骨骼的测试动作，例如下面这个 `custom_animations` 字段：
+
+```json
+{
+  "custom_animations": {
+    "joint_probe": {
+      "bones": {
+        "forearm": {
+          "rotate": [
+            {"time": 0, "angle": 0},
+            {"time": 1, "angle": 15},
+            {"time": 2, "angle": 0}
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+这只是配置片段，需要合入完整配置，并把 `forearm` 改成实际骨骼名称。这里的 `angle` 是生成器的输入简写，导出为 Spine 4.2 时转换为 `value`。已有的 4.2 时间线不要直接作为同一种输入再次转换。
+
+打开 `temp/spine/preview.html`。角色资源嵌在 HTML 中，但播放器 JS/CSS 仍从 CDN 加载，需要网络。看到 `Loaded successfully` 只说明加载成功，还要选择实际动作、确认没有暂停，并观察完整循环。
+
+## 6. 从小动作开始验收
+
+建议顺序：
+
+1. **设置姿势**：贴图是否齐全、顺序是否正确、比例和位置是否吻合？
+2. **单关节测试**：肩、肘、髋、膝分别小幅转动，检查断口、穿插和异常枢轴。
+3. **最小待机**：调整到合适的休息姿势，再加入轻微呼吸与起伏。
+4. **挥手／正面踏步**：检查多关节联动；正面踏步不等于侧向行走。
+5. **攻击与大幅动作**：先确定武器、朝向和关键姿势，再补遮挡或增加视图。
+
+如果切口在静止时就出现细线，检查坐标、纹理采样与图集边缘扩展；如果只在转动时出现大缺口，则优先检查枢轴、重叠和隐藏结构。图集 padding 留空不等于已经做了边缘像素扩展，现有通用打包脚本也不自动补关节。
+
+**不能把任意动作直接绑定到任意骨架。** 名称、层级、比例、关节方向和可用贴图必须适配。`idle / walk / run / wave / jump / attack` 是生成器中的动作预设名称，不是对你的角色美术质量的保证。
+
+## 辅助脚本与其他路线
+
+| 文件 | 用途与边界 |
+| --- | --- |
+| [make_atlas.py](spine-animation-ai/scripts/make_atlas.py) | 将已有 PNG 部件打成图集，不判断部件语义。 |
+| [build_spine_json.py](spine-animation-ai/scripts/build_spine_json.py) | 按配置生成骨架和时间线，不从图像自动识别关节。 |
+| [generate_spine_player.py](spine-animation-ai/scripts/generate_spine_player.py) | 生成官方播放器预览页，用于实际检查。 |
+| [position_parts.py](spine-animation-ai/scripts/position_parts.py) | 对重新生成的部件尝试特征／模板匹配；需要复核。原坐标已知的切片不必再猜位置。 |
+| [split_character.py](spine-animation-ai/scripts/split_character.py) | 另一条实验路线：调用图像服务生成拆件表，再做连通域裁切；不是本指南的完整图硬拆入口。 |
+
+图像定位和分割相关代码还需要 `opencv-python`、`numpy`、`Pillow`。`split_character.py` 的生成入口另需 `openai` 和图像服务配置；执行其 CLI 会外发输入图片、调用服务并可能产生费用，并非纯本地抠图命令。使用前检查代码与服务政策，不要将私有角色素材自动上传。
+
+本地实验用过的适配器和按图定制的切割脚本，不作为本指南保证提供的通用功能。上游 `reskin-app/` 是另一套应用，不是照这份指南操作的必需步骤。
+
+## 文件管理与隐私
+
+- 通用文档、辅助脚本和测试可以进入版本控制；公开示例只使用有明确再分发许可的素材。
+- 私人角色的图片、设定、专属提示词、生成记录和动画包不属于公开教程资产，也不因仓库代码许可证而获得使用授权。
+- `temp/` 用于临时实验；`private-assets/` 用于本地私有归档，两者均在 `.gitignore` 中。
+- 私有素材整理时先打包并校验，再清理散文件；保留原始参考，不覆盖唯一源文件。
+- `.gitignore` 不会撤回已提交的文件，也不是访问控制。分享 ZIP、截图或 HTML 前仍要检查内容，尤其是内嵌图像。
+- 不提交密钥、账户配置、个人绝对路径或未授权的第三方游戏资产。
+
+## 检查、上游与许可证
+
+代码回归检查：
+
+```bash
+python -B -m unittest discover -s tests -v
+git diff --check
+```
+
+测试通过不等于美术和动作验收通过；最终仍需实际播放并记录缺陷。
+
+本仓库保留 [GenielabsOpenSource/spine-animation-ai](https://github.com/GenielabsOpenSource/spine-animation-ai) 的内置副本与部分修改，包括图像接口适配、透明处理及 Spine 4.2 格式修复。上游同步范围见 [UPSTREAM.md](UPSTREAM.md)，上游原始文档不等同于本指南已经验证的能力。
+
+- 仓库自有内容遵循根目录 [AGPL-3.0-or-later](LICENSE)。
+- `spine-animation-ai/` 及其修改版继续遵循 [PolyForm Noncommercial 1.0.0](spine-animation-ai/LICENSE)，保留原作者版权及 [NOTICE.md](NOTICE.md)。
+- 这是混合许可证仓库，不能将整个仓库当作可自由商用的 AGPL 项目；商业使用涉及上游部分时需另行取得授权。
+- Spine 编辑器和运行时有各自的许可要求，请查阅 [Spine 官方许可信息](https://esotericsoftware.com/spine-runtimes-license)。第三方工具和模型服务也遵循其各自条款。
+
+**目标不是证明“一键生成万能小人”，而是把每一步做实，让下一次制作有据可循。**
